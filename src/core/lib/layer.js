@@ -497,11 +497,19 @@ export default class Layer {
   }
 
   diffProps(oldProps, newProps, context) {
+    // Until we have proper prop types, autodetect accessors by querying the attribute manager
+    const {attributeManager} = this.state || {};
+    const propTypes = attributeManager ? attributeManager.getAccessors() : {};
+
     // First check if any props have changed (ignore props that will be examined separately)
     const propsChangedReason = compareProps({
       newProps,
       oldProps,
-      ignoreProps: {data: null, updateTriggers: null}
+      ignoreProps: {data: null, updateTriggers: null},
+      // Any prop present as a key in this object will compare functions shallowly
+      // at the moment this is only used for accessors since the aggregating layers
+      // rely on tracking function changes - that should be aligned for next major release
+      propTypes
     });
 
     // Now check if any data related props have changed

@@ -97,9 +97,15 @@ const TEST_CASES = [
     object2: {prop: func},
     result: SAME
   }, {
-    title: 'not equal functions',
+    title: 'not equal functions, no prop types',
     object1: {prop: x => x},
     object2: {prop: x => x * 2},
+    result: NOT_SAME
+  }, {
+    title: 'not equal functions, with prop types',
+    object1: {prop: x => x},
+    object2: {prop: x => x * 2},
+    propTypes: {prop: true},
     result: SAME
   }, {
     title: 'function vs array',
@@ -116,7 +122,11 @@ test('compareProps#import', t => {
 
 test('compareProps#tests', t => {
   for (const tc of TEST_CASES) {
-    const result = compareProps({oldProps: tc.object1, newProps: tc.object2});
+    const result = compareProps({
+      oldProps: tc.object1,
+      newProps: tc.object2,
+      propTypes: tc.propTypes || {}
+    });
     t.ok(result === null || typeof result === 'string',
       `compareProps ${tc.title} returned expected type`);
     if (typeof result === 'string') {

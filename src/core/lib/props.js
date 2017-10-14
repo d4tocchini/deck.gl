@@ -10,9 +10,9 @@ import assert from 'assert';
  * @returns {null|String} - null when values of all keys are strictly equal.
  *   if unequal, returns a string explaining what changed.
  */
-/* eslint-disable max-statements, complexity */
+/* eslint-disable max-statements, max-depth, complexity */
 export function compareProps({
-  oldProps, newProps, ignoreProps = {}, triggerName = 'props'
+  oldProps, newProps, ignoreProps = {}, propTypes = {}, triggerName = 'props'
 } = {}) {
   assert(oldProps !== undefined && newProps !== undefined, 'compareProps args');
 
@@ -21,6 +21,7 @@ export function compareProps({
     return null;
   }
 
+  // TODO - do we need these checks? Should never happen...
   if (typeof newProps !== 'object' || newProps === null) {
     return `${triggerName} changed shallowly`;
   }
@@ -43,9 +44,11 @@ export function compareProps({
       }
 
       // If both new and old value are functions, ignore differences
-      const type = typeof newProps[key];
-      if (type === 'function' && typeof oldProps[key] === 'function') {
-        equals = true;
+      if (key in propTypes) {
+        const type = typeof newProps[key];
+        if (type === 'function' && typeof oldProps[key] === 'function') {
+          equals = true;
+        }
       }
 
       if (!equals && oldProps[key] !== newProps[key]) {
@@ -65,7 +68,7 @@ export function compareProps({
 
   return null;
 }
-/* eslint-enable max-statements, complexity */
+/* eslint-enable max-statements, max-depth, complexity */
 
 // HELPERS
 
