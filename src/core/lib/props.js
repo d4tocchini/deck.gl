@@ -58,6 +58,84 @@ export function compareProps({oldProps, newProps, ignoreProps = {}, triggerName 
 }
 /* eslint-enable max-statements, complexity */
 
+export function diffProps(oldProps, newProps, onUpdateTriggered = () => {}) {
+  // First check if any props have changed (ignore props that will be examined separately)
+  const propsChangedReason = compareProps({
+    newProps,
+    oldProps,
+    ignoreProps: {data: null, updateTriggers: null}
+  });
+
+  // Now check if any data related props have changed
+  const dataChangedReason = _diffDataProps(oldProps, newProps);
+
+  // Check update triggers to determine if any attributes need regeneration
+  // Note - if data has changed, all attributes will need regeneration, so skip this step
+  let updateTriggersChangedReason = false;
+  if (!dataChangedReason) {
+    updateTriggersChangedReason = _diffUpdateTriggers(oldProps, newProps, onUpdateTriggered);
+  }
+
+  return {
+    dataChanged: dataChangedReason,
+    propsChanged: propsChangedReason,
+    updateTriggersChanged: updateTriggersChangedReason
+  };
+}
+
+// PRIVATE METHODS
+
+// The comparison of the data prop requires special handling
+// the dataComparator should be used if supplied
+function _diffDataProps(oldProps, props) {
+  if (oldProps === null) {
+    return 'oldProps is null, initial diff';
+  }
+
+  // Support optional app defined comparison of data
+  const {dataComparator} = props;
+  if (dataComparator) {
+    if (!dataComparator(props.data, oldProps.data)) {
+      return 'Data comparator detected a change';
+    }
+  // Otherwise, do a shallow equal on props
+  } else if (props.data !== oldProps.data) {
+    return 'A new data container was supplied';
+  }
+
+  return null;
+}
+
+// Checks if any update triggers have changed, and invalidate
+// attributes accordingly.
+/* eslint-disable max-statements */
+function _diffUpdateTriggers(oldProps, props, onUpdateTriggered) {
+  // const {attributeManager} = this.state;
+  // const updateTriggerMap = attributeManager.getUpdateTriggerMap();
+  if (oldProps === null) {
+    return true; // oldProps is null, initial diff
+  }
+
+  let change = false;
+
+  for (const propName in props.updateTriggers) {
+    const oldTriggers = oldProps.updateTriggers[propName] || {};
+    const newTriggers = props.updateTriggers[propName] || {};
+    const diffReason = compareProps({
+      oldProps: oldTriggers,
+      newProps: newTriggers,
+      triggerName: propName
+    });
+    if (diffReason) {
+      onUpdateTriggered(propName);
+      change = true;
+    }
+  }
+
+  return change;
+}
+/* eslint-enable max-statements */
+
 // HELPERS
 
 // Constructors have their super class constructors as prototypes

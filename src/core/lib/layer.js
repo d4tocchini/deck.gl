@@ -22,7 +22,7 @@
 import {COORDINATE_SYSTEM, LIFECYCLE} from './constants';
 import AttributeManager from './attribute-manager';
 import Stats from './stats';
-import {getDefaultProps, compareProps} from './props';
+import {getDefaultProps, diffProps} from './props';
 import {log, count} from './utils';
 import {applyPropOverrides, removeLayerInSeer} from './seer-integration';
 import {GL, withParameters} from 'luma.gl';
@@ -79,6 +79,26 @@ export default class Layer {
    * @param {object} props - See docs and defaults above
    */
   constructor(props) {
+    this.props = this._normalizeProps(props); // Current props, a frozen object
+
+    // Define all members
+    this.id = this.props.id; // The layer's id, used for matching with layers from last render cycle
+    this.animatedProps = null; // Computing animated props requires layer manager state
+    this.oldProps = null; // Props from last render used for change detection
+    this.state = null; // Will be set to the shared layer state object during layer matching
+    this.context = null; // Will reference layer manager's context, contains state shared by layers
+    this.count = counter++; // Keep track of how many layer instances you are generating
+    this.lifecycle = LIFECYCLE.NO_STATE; // Helps track and debug the life cycle of the layers
+
+    // CompositeLayer members, need to be defined here because of the `Object.seal`
+    this.parentLayer = null; // reference to the composite layer parent that rendered this layer
+    this.oldSubLayers = []; // reference to sublayers rendered in the previous cycle
+
+    // Seal the layer
+    Object.seal(this);
+  }
+
+  _normalizeProps(props) {
     // If sublayer has static defaultProps member, getDefaultProps will return it
     const mergedDefaultProps = getDefaultProps(this);
     // Merge supplied props with pre-merged default props
@@ -90,21 +110,7 @@ export default class Layer {
     applyPropOverrides(props);
     // Props are immutable
     Object.freeze(props);
-
-    // Define all members
-    this.id = props.id; // The layer's id, used for matching with layers' from last render cyckle
-    this.props = props; // Current props, a frozen object
-    this.animatedProps = null; // Computing animated props requires layer manager state
-    this.oldProps = null; // Props from last render used for change detection
-    this.state = null; // Will be set to the shared layer state object during layer matching
-    this.context = null; // Will reference layer manager's context, contains state shared by layers
-    this.count = counter++; // Keep track of how many layer instances you are generating
-    this.lifecycle = LIFECYCLE.NO_STATE; // Helps track and debug the life cycle of the layers
-    // CompositeLayer members, need to be defined here because of the `Object.seal`
-    this.parentLayer = null; // reference to the composite layer parent that rendered this layer
-    this.oldSubLayers = []; // reference to sublayers rendered in the previous cycle
-    // Seal the layer
-    Object.seal(this);
+    return props;
   }
 
   toString() {
@@ -133,8 +139,9 @@ export default class Layer {
   // Default implementation, all attributes will be invalidated and updated
   // when data changes
   updateState({oldProps, props, oldContext, context, changeFlags}) {
-    if (changeFlags.dataChanged) {
-      this.invalidateAttribute('all');
+    const {attributeManager} = this.state;
+    if (changeFlags.dataChanged && attributeManager) {
+      attributeManager.invalidateAll();
     }
   }
 
@@ -167,15 +174,6 @@ export default class Layer {
 
   // END LIFECYCLE METHODS
   // //////////////////////////////////////////////////
-
-  // Default implementation of attribute invalidation, can be redefine
-  invalidateAttribute(name = 'all') {
-    if (name === 'all') {
-      this.state.attributeManager.invalidateAll();
-    } else {
-      this.state.attributeManager.invalidate(name);
-    }
-  }
 
   // Returns true if the layer is pickable and visible.
   isPickable() {
@@ -360,34 +358,35 @@ export default class Layer {
   // Called by layer manager when a new layer is found
   /* eslint-disable max-statements */
   initializeLayer(updateParams) {
-    assert(this.context.gl, 'Layer context missing gl');
-    assert(!this.state, 'Layer missing state');
+    assert(this.context.gl);
+    assert(!this.state);
 
-    this.state = {};
-    this.state.stats = new Stats({id: 'draw'});
-
-    // Initialize state only once
-    this.setState({
-      attributeManager: new AttributeManager({id: this.props.id}),
-      model: null,
-      needsRedraw: true,
-      dataChanged: true
-    });
-
-    const {attributeManager} = this.state;
+    const attributeManager = new AttributeManager({id: this.props.id});
     // All instanced layers get instancePickingColors attribute by default
     // Their shaders can use it to render a picking scene
-    // TODO - this slows down non instanced layers
+    // TODO - this slightly slows down non instanced layers
     attributeManager.addInstanced({
       instancePickingColors: {
-        type: GL.UNSIGNED_BYTE,
-        size: 3,
-        update: this.calculateInstancePickingColors
+        type: GL.UNSIGNED_BYTE, size: 3, update: this.calculateInstancePickingColors
       }
     });
 
-    // Call subclass lifecycle methods
+    this.state = {
+      attributeManager,
+      model: null,
+      needsRedraw: true,
+      stats: new Stats({id: 'draw'})
+    };
+    this.setChangeFlags({dataChanged: true, propsChange: true, viewportChanged: true});
+
     this.initializeState(this.context);
+
+    this.setChangeFlags({dataChanged: true, propsChange: true, viewportChanged: true});
+    updateParams = Object.assign({}, this.context, updateParams, {
+      changeFlags: this.state.changeFlags
+    });
+
+    // Call subclass lifecycle methods
     this.updateState(updateParams);
     // End subclass lifecycle methods
 
@@ -404,17 +403,29 @@ export default class Layer {
       model.geometry.id = `${this.props.id}-geometry`;
       model.setAttributes(attributeManager.getAttributes());
     }
+
+    this.clearChangeFlags();
   }
 
-  // Called by layer manager when existing layer is getting new props
-  updateLayer(updateParams) {
-    // Check for deprecated method
-    if (this.shouldUpdate) {
-      log.deprecated('shouldUpdate', 'shouldUpdateState');
-    }
+  // Called by layer manager
+  // if this layer is new (not matched with an existing layer) oldProps will be empty object
+  updateLayer({oldProps = {}, oldContext = {}}) {
+    this.oldProps = oldProps;
 
-    // Ensure context is available
-    updateParams = Object.assign({}, this.context, updateParams);
+    this.diffProps(this.props, oldProps);
+
+    // TODO - check change flags and return if no change?
+    // if (!state.changeFlags.somethingChanged) {
+    // return
+    // }
+
+    const updateParams = {
+      props: this.props,
+      oldProps,
+      context: this.context,
+      oldContext,
+      changeFlags: this.state.changeFlags
+    };
 
     // Call subclass lifecycle method
     const stateNeedsUpdate = this.shouldUpdateState(updateParams);
@@ -434,6 +445,8 @@ export default class Layer {
       if (this.state.model) {
         this.state.model.setInstanceCount(this.getNumInstances());
       }
+
+      this.clearChangeFlags();
     }
   }
   /* eslint-enable max-statements */
@@ -496,110 +509,78 @@ export default class Layer {
     return redraw;
   }
 
-  diffProps(oldProps, newProps, context) {
-    // First check if any props have changed (ignore props that will be examined separately)
-    const propsChangedReason = compareProps({
-      newProps,
-      oldProps,
-      ignoreProps: {data: null, updateTriggers: null}
-    });
+  // Helper methods
 
-    // Now check if any data related props have changed
-    const dataChangedReason = this._diffDataProps(oldProps, newProps);
-
-    const propsChanged = Boolean(propsChangedReason);
-    const dataChanged = Boolean(dataChangedReason);
-    const viewportChanged = context.viewportChanged;
-
-    let updateTriggersChanged = false;
-    // Check update triggers to determine if any attributes need regeneration
-    // Note - if data has changed, all attributes will need regeneration, so skip this step
-    if (!dataChanged) {
-      updateTriggersChanged = this._diffUpdateTriggers(oldProps, newProps);
+  // Dirty some change flags, will be handled by updateLayer
+  setChangeFlags(flags) {
+    this.state.changeFlags = this.state.changeFlags || {};
+    const changeFlags = this.state.changeFlags;
+    if (flags.dataChanged && !changeFlags.dataChanged) {
+      changeFlags.dataChanged = flags.dataChanged;
+      changeFlags.propsOrDataChanged = flags.dataChanged;
+      changeFlags.somethingChanged = flags.dataChanged;
+      log.log(LOG_PRIORITY_UPDATE,
+        `dataChanged: ${flags.dataChanged} in ${this.id}`);
+    }
+    if (flags.updateTriggersChanged && !changeFlags.dataChanged) {
+      changeFlags.updateTriggersChanged = flags.updateTriggersChanged;
+      changeFlags.propsOrDataChanged = flags.updateTriggersChanged;
+      changeFlags.somethingChanged = flags.updateTriggersChanged;
+      log.log(LOG_PRIORITY_UPDATE,
+        `updateTriggersChanged: ${flags.updateTriggersChanged} in ${this.id}`);
+    }
+    if (flags.propsChanged && !changeFlags.propsChanged) {
+      changeFlags.propsChanged = true;
+      changeFlags.propsOrDataChanged = true;
+      changeFlags.somethingChanged = true;
+      log.log(LOG_PRIORITY_UPDATE,
+        `propsChanged: ${flags.reason} in ${this.id}`);
+    }
+    if (flags.viewportChanged && !changeFlags.viewportChanged) {
+      changeFlags.viewportChanged = true;
+      changeFlags.somethingChanged = true;
     }
 
-    const propsOrDataChanged = propsChanged || dataChanged || updateTriggersChanged;
-    const somethingChanged = propsOrDataChanged || viewportChanged;
+    return changeFlags;
+  }
 
-    // Trace what happened
-    if (dataChanged) {
-      log.log(LOG_PRIORITY_UPDATE, `dataChanged: ${dataChangedReason} in ${this.id}`);
-    } else if (propsChanged) {
-      log.log(LOG_PRIORITY_UPDATE, `propsChanged: ${propsChangedReason} in ${this.id}`);
-    }
+  // Clear all changeFlags, typically after an update
+  clearChangeFlags() {
+    this.state.changeFlags = {
+      // Primary changeFlags, can be strings stating reason for change
+      propsChanged: false,
+      dataChanged: false,
+      updateTriggersChanged: false,
+      viewportChanged: false,
 
-    return {
-      propsChanged,
-      dataChanged,
-      updateTriggersChanged,
-      propsOrDataChanged,
-      viewportChanged,
-      somethingChanged,
-      reason: dataChangedReason || propsChangedReason || 'Viewport changed'
+      // Derived changeFlags
+      propsOrDataChanged: false,
+      somethingChanged: false
     };
   }
 
-  // PRIVATE METHODS
-
-  // The comparison of the data prop requires special handling
-  // the dataComparator should be used if supplied
-  _diffDataProps(oldProps, newProps) {
-    if (oldProps === null) {
-      return 'oldProps is null, initial diff';
-    }
-
-    // Support optional app defined comparison of data
-    const {dataComparator} = newProps;
-    if (dataComparator) {
-      if (!dataComparator(newProps.data, oldProps.data)) {
-        return 'Data comparator detected a change';
-      }
-    // Otherwise, do a shallow equal on props
-    } else if (newProps.data !== oldProps.data) {
-      return 'A new data container was supplied';
-    }
-
-    return null;
+  diffProps(oldProps, newProps) {
+    let changeFlags = diffProps(oldProps, newProps, this._onUpdateTriggered.bind(this));
+    changeFlags = this.setChangeFlags(changeFlags);
+    return changeFlags;
   }
 
-  // Checks if any update triggers have changed, and invalidate
-  // attributes accordingly.
-  /* eslint-disable max-statements */
-  _diffUpdateTriggers(oldProps, newProps) {
-    // const {attributeManager} = this.state;
-    // const updateTriggerMap = attributeManager.getUpdateTriggerMap();
-    if (oldProps === null) {
-      return true; // oldProps is null, initial diff
-    }
-
-    let change = false;
-
-    for (const propName in newProps.updateTriggers) {
-      const oldTriggers = oldProps.updateTriggers[propName] || {};
-      const newTriggers = newProps.updateTriggers[propName] || {};
-      const diffReason = compareProps({
-        oldProps: oldTriggers,
-        newProps: newTriggers,
-        triggerName: propName
-      });
-      if (diffReason) {
-        if (propName === 'all') {
-          log.log(LOG_PRIORITY_UPDATE,
-            `updateTriggers invalidating all attributes: ${diffReason}`);
-          this.invalidateAttribute('all');
-          change = true;
-        } else {
-          log.log(LOG_PRIORITY_UPDATE,
-            `updateTriggers invalidating attribute ${propName}: ${diffReason}`);
-          this.invalidateAttribute(propName);
-          change = true;
-        }
+  _onUpdateTriggered(propName, diffReason) {
+    const {attributeManager} = this.state;
+    if (attributeManager) {
+      switch (propName) {
+      case 'all':
+        log.log(LOG_PRIORITY_UPDATE,
+          `updateTriggers invalidating all attributes: ${diffReason}`);
+        attributeManager.invalidateAll();
+        break;
+      default:
+        log.log(LOG_PRIORITY_UPDATE,
+          `updateTriggers invalidating attribute ${propName}: ${diffReason}`);
+        attributeManager.invalidate(propName);
       }
     }
-
-    return change;
   }
-  /* eslint-enable max-statements */
 
   _checkRequiredProp(propertyName, condition) {
     const value = this.props[propertyName];
