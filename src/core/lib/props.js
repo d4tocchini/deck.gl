@@ -11,7 +11,9 @@ import assert from 'assert';
  *   if unequal, returns a string explaining what changed.
  */
 /* eslint-disable max-statements, complexity */
-export function compareProps({oldProps, newProps, ignoreProps = {}, triggerName = 'props'} = {}) {
+export function compareProps({
+  oldProps, newProps, ignoreProps = {}, triggerName = 'props'
+} = {}) {
   assert(oldProps !== undefined && newProps !== undefined, 'compareProps args');
 
   // shallow equality => deep equality
@@ -34,9 +36,16 @@ export function compareProps({oldProps, newProps, ignoreProps = {}, triggerName 
         return `${triggerName} ${key} dropped: ${oldProps[key]} -> (undefined)`;
       }
 
-      const equals = newProps[key] && oldProps[key] && newProps[key].equals;
+      // If object has an equals function, invoke it
+      let equals = newProps[key] && oldProps[key] && newProps[key].equals;
       if (equals && !equals.call(newProps[key], oldProps[key])) {
         return `${triggerName} ${key} changed deeply: ${oldProps[key]} -> ${newProps[key]}`;
+      }
+
+      // If both new and old value are functions, ignore differences
+      const type = typeof newProps[key];
+      if (type === 'function' && typeof oldProps[key] === 'function') {
+        equals = true;
       }
 
       if (!equals && oldProps[key] !== newProps[key]) {
